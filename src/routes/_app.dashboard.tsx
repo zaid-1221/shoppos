@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DateRangePicker, PageHeader, StatCard, StatusBadge, ProductThumb, EmptyState } from "@/components/shared";
 import { due, saleDue, saleProfit, stockStatus, useDB } from "@/lib/store";
+import { takeRecent } from "@/lib/query";
 import { fmtDate, fmtTime, inRange, pageHead, rs, toDateInput, type Range } from "@/lib/format";
 
 export const Route = createFileRoute("/_app/dashboard")({
@@ -186,7 +187,7 @@ function Dashboard() {
           <CardHeader className="flex-row items-center justify-between pb-3"><CardTitle className="text-base">Recent Sales</CardTitle><Link to="/sales" className="text-sm font-medium text-primary">View all</Link></CardHeader>
           <CardContent className="px-0">
             <div className="divide-y">
-              {db.sales.slice(0, 7).map((s) => (
+              {takeRecent(db.sales, 7).map((s) => (
                 <Link key={s.id} to="/sales/$id" params={{ id: s.id }} className="flex items-center gap-3 px-6 py-2.5 hover:bg-muted/50">
                   <div className="min-w-0 flex-1"><p className="text-sm font-medium">{s.invoiceNo} · {cust(s.customerId)}</p><p className="text-xs text-muted-foreground">{fmtDate(s.date)} {fmtTime(s.date)} · {s.method}</p></div>
                   <StatusBadge status={s.status} />

@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { CurrencyInput, Field, ProductThumb, SearchableSelect } from "@/components/shared";
 import { actions, getState, useDB } from "@/lib/store";
+import { compressImageFile } from "@/lib/image-compress";
 import { rs, supplierName } from "@/lib/format";
 import { categoryLabel, parentCategories, subcategoriesOf, type Product } from "@/lib/mock-data";
 
@@ -71,11 +72,14 @@ export function ProductForm({ product, defaultSupplierId }: { product?: Product;
   const margin = f.salePrice - f.purchasePrice;
   const marginPct = f.purchasePrice > 0 ? Math.round((margin / f.purchasePrice) * 100) : 0;
 
-  const pickImage = (file?: File) => {
+  const pickImage = async (file?: File) => {
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => set("image", String(reader.result));
-    reader.readAsDataURL(file);
+    try {
+      const dataUrl = await compressImageFile(file);
+      set("image", dataUrl);
+    } catch {
+      toast.error("Could not process that image. Try a smaller JPG or PNG.");
+    }
   };
 
   const validate = () => {
@@ -318,7 +322,7 @@ export function ProductForm({ product, defaultSupplierId }: { product?: Product;
                 )}
               </div>
             </div>
-            <p className="text-xs text-muted-foreground">Optional. Without an image we show a category icon.</p>
+            <p className="text-xs text-muted-foreground">Optional. Images are compressed automatically to keep storage small.</p>
           </CardContent>
         </Card>
 

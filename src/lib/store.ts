@@ -10,8 +10,14 @@ import {
   type PermModule,
   type RolePermissions,
 } from "./permissions";
+import {
+  flushPersist,
+  loadPersistedRoot,
+  pruneBag,
+  RETENTION,
+  schedulePersist,
+} from "./persist";
 
-const AUTH_KEY = "shopflow-auth-v2";
 const AUTH_KEY_LEGACY = "shopflow-auth-v1";
 
 const SHOP_KEYS = [
@@ -49,15 +55,6 @@ type RootState = {
   sessionUserId: string | null;
   viewingShopId: string | null;
   currentUser: string;
-};
-
-type AuthPersist = {
-  shops: M.Shop[];
-  bags: Record<string, ShopBag>;
-  allUsers: M.User[];
-  platformFees?: M.PlatformFee[];
-  sessionUserId: string | null;
-  viewingShopId: string | null;
 };
 
 export function emptyShopBag(settings?: M.Settings): ShopBag {
@@ -103,34 +100,51 @@ function normalizeBag(bag: Partial<ShopBag> | undefined): ShopBag {
   return { ...emptyShopBag(), ...(bag ?? {}) };
 }
 
+function hydrateFromPersist(data: {
+  shops: M.Shop[];
+  bags: Record<string, Partial<ShopBag>>;
+  allUsers: M.User[];
+  platformFees?: M.PlatformFee[];
+  sessionUserId: string | null;
+  viewingShopId: string | null;
+  currentUser?: string;
+}): RootState {
+  const seed = seedRoot();
+  const allUsers = (data.allUsers?.length ? data.allUsers : seed.allUsers).map(normalizeUser);
+  const sessionUser = allUsers.find((u) => u.id === data.sessionUserId);
+  const shops = data.shops?.length ? data.shops : seed.shops;
+  const rawBags = data.bags && Object.keys(data.bags).length ? data.bags : seed.bags;
+  const bags: Record<string, ShopBag> = {};
+  for (const shop of shops) {
+    bags[shop.id] = pruneBag(normalizeBag(rawBags[shop.id]));
+  }
+  for (const [id, bag] of Object.entries(rawBags)) {
+    if (!bags[id]) bags[id] = pruneBag(normalizeBag(bag));
+  }
+  return {
+    shops,
+    bags,
+    allUsers,
+    platformFees: Array.isArray(data.platformFees)
+      ? data.platformFees.slice(0, RETENTION.platformFees)
+      : [],
+    sessionUserId: sessionUser ? data.sessionUserId : null,
+    viewingShopId: data.viewingShopId && bags[data.viewingShopId] ? data.viewingShopId : null,
+    currentUser: sessionUser?.name ?? data.currentUser ?? "Guest",
+  };
+}
+
 function loadRoot(): RootState {
   if (typeof window === "undefined") return seedRoot();
   try {
-    const raw = localStorage.getItem(AUTH_KEY);
-    if (raw) {
-      const data = JSON.parse(raw) as AuthPersist;
-      const seed = seedRoot();
-      const allUsers = (data.allUsers?.length ? data.allUsers : seed.allUsers).map(normalizeUser);
-      const sessionUser = allUsers.find((u) => u.id === data.sessionUserId);
-      const shops = data.shops?.length ? data.shops : seed.shops;
-      const rawBags = data.bags && Object.keys(data.bags).length ? data.bags : seed.bags;
-      const bags: Record<string, ShopBag> = {};
-      for (const shop of shops) {
-        bags[shop.id] = normalizeBag(rawBags[shop.id]);
-      }
-      for (const [id, bag] of Object.entries(rawBags)) {
-        if (!bags[id]) bags[id] = normalizeBag(bag);
-      }
-      return {
-        shops,
-        bags,
-        allUsers,
-        platformFees: Array.isArray(data.platformFees) ? data.platformFees : [],
-        sessionUserId: sessionUser ? data.sessionUserId : null,
-        viewingShopId: data.viewingShopId && bags[data.viewingShopId] ? data.viewingShopId : null,
-        currentUser: sessionUser?.name ?? "Guest",
-      };
+    const split = loadPersistedRoot();
+    if (split) {
+      return hydrateFromPersist({
+        ...split,
+        bags: split.bags as Record<string, Partial<ShopBag>>,
+      });
     }
+
     // Migrate legacy single-tenant auth blob into demo shop bag
     const legacy = localStorage.getItem(AUTH_KEY_LEGACY);
     if (legacy) {
@@ -144,7 +158,7 @@ function loadRoot(): RootState {
       const demoBag = seeded.bags[M.DEMO_SHOP_ID] ?? emptyShopBag();
       if (old.settings) demoBag.settings = old.settings;
       if (old.rolePermissions) demoBag.rolePermissions = old.rolePermissions;
-      seeded.bags[M.DEMO_SHOP_ID] = demoBag;
+      seeded.bags[M.DEMO_SHOP_ID] = pruneBag(demoBag);
       if (old.users?.length) {
         const migrated = old.users.map((u) =>
           normalizeUser({
@@ -170,16 +184,29 @@ function loadRoot(): RootState {
 }
 
 function saveRoot(r: RootState) {
-  if (typeof window === "undefined") return;
-  const payload: AuthPersist = {
+  schedulePersist({
     shops: r.shops,
-    bags: r.bags,
+    bags: r.bags as Record<string, import("./persist").PersistBag>,
     allUsers: r.allUsers,
     platformFees: r.platformFees,
     sessionUserId: r.sessionUserId,
     viewingShopId: r.viewingShopId,
-  };
-  localStorage.setItem(AUTH_KEY, JSON.stringify(payload));
+    currentUser: r.currentUser,
+  });
+}
+
+/** Cap noisy lists in memory so UI stays snappy (same limits as disk). */
+function capNotes(list: M.AppNotification[]): M.AppNotification[] {
+  return list.length <= RETENTION.notifications ? list : list.slice(0, RETENTION.notifications);
+}
+function capHeld(list: M.HeldSale[]): M.HeldSale[] {
+  return list.length <= RETENTION.held ? list : list.slice(0, RETENTION.held);
+}
+function capLogs(list: M.AccountBalanceLog[]): M.AccountBalanceLog[] {
+  return list.length <= RETENTION.accountBalanceLogs ? list : list.slice(0, RETENTION.accountBalanceLogs);
+}
+function withLowStockNotes(prev: M.Product[], next: M.Product[], existing: M.AppNotification[]) {
+  return capNotes([...lowStockNotes(prev, next), ...existing]);
 }
 
 let root: RootState = loadRoot();
@@ -264,10 +291,11 @@ function invalidateSnapshots() {
   cachedPlatform = null;
 }
 
-function commitRoot(next: RootState) {
+function commitRoot(next: RootState, opts?: { flush?: boolean }) {
   root = next;
   invalidateSnapshots();
   saveRoot(root);
+  if (opts?.flush) flushPersist();
   listeners.forEach((l) => l());
 }
 
@@ -621,7 +649,7 @@ export const actions = {
           next: input.openingBalance,
           by: s.currentUser,
         };
-        return { accounts, accountBalanceLogs: [log, ...s.accountBalanceLogs] };
+        return { accounts, accountBalanceLogs: capLogs([log, ...s.accountBalanceLogs]) };
       });
       return input.id;
     }
@@ -638,10 +666,10 @@ export const actions = {
     const next = previous + amount;
     setState((s) => ({
       accounts: s.accounts.map((a) => (a.id === id ? { ...a, openingBalance: next } : a)),
-      accountBalanceLogs: [
+      accountBalanceLogs: capLogs([
         { id: uid("abl"), accountId: id, date: now(), kind: "add", previous, next, by: s.currentUser },
         ...s.accountBalanceLogs,
-      ],
+      ]),
     }));
     return "ok";
   },
@@ -659,10 +687,10 @@ export const actions = {
           ? { ...a, openingBalance, openingBalanceEdited: true }
           : a
       ),
-      accountBalanceLogs: [
+      accountBalanceLogs: capLogs([
         { id: uid("abl"), accountId: id, date: now(), kind: "edit", previous, next: openingBalance, by: s.currentUser },
         ...s.accountBalanceLogs,
-      ],
+      ]),
     }));
     return "ok";
   },
@@ -753,7 +781,7 @@ export const actions = {
       const it = input.items.find((i) => i.productId === p.id);
       return it ? { ...p, stock: p.stock - it.qty } : p;
     });
-    setState(() => ({ sales: [sale, ...s.sales], products, nextInvoice: s.nextInvoice + 1, notifications: [...lowStockNotes(s.products, products), ...s.notifications] }));
+    setState(() => ({ sales: [sale, ...s.sales], products, nextInvoice: s.nextInvoice + 1, notifications: withLowStockNotes(s.products, products, s.notifications) }));
     return sale;
   },
   updateSale(saleId: string, input: { customerId: string | null; items: M.LineItem[]; discount: number; accountId: string; received: number; notes?: string }): M.Sale | null {
@@ -799,7 +827,7 @@ export const actions = {
     setState(() => ({
       sales: s.sales.map((x) => (x.id === saleId ? sale : x)),
       products,
-      notifications: [...lowStockNotes(s.products, products), ...s.notifications],
+      notifications: withLowStockNotes(s.products, products, s.notifications),
     }));
     return sale;
   },
@@ -883,7 +911,7 @@ export const actions = {
     setState(() => ({
       purchases: s.purchases.map((x) => (x.id === purchaseId ? pur : x)),
       products,
-      notifications: [...lowStockNotes(s.products, products), ...s.notifications],
+      notifications: withLowStockNotes(s.products, products, s.notifications),
     }));
     return pur;
   },
@@ -955,11 +983,11 @@ export const actions = {
       viewingShopId: null,
       currentUser: user.name,
       allUsers: root.allUsers.map((u) => (u.id === user.id ? { ...u, lastLogin: now() } : u)),
-    });
+    }, { flush: true });
     return { ok: true, user };
   },
   logout() {
-    commitRoot({ ...root, sessionUserId: null, viewingShopId: null, currentUser: "Guest" });
+    commitRoot({ ...root, sessionUserId: null, viewingShopId: null, currentUser: "Guest" }, { flush: true });
   },
   enterShop(shopId: string): { ok: true } | { ok: false; error: string } {
     const user = getSessionUser();
@@ -1207,7 +1235,7 @@ export const actions = {
     const after = a.type === "Add" ? before + a.qty : a.type === "Correction" ? a.qty : Math.max(0, before - a.qty);
     const products = s.products.map((x) => (x.id === p.id ? { ...x, stock: after } : x));
     setState(() => ({
-      products, notifications: [...lowStockNotes(s.products, products), ...s.notifications],
+      products, notifications: withLowStockNotes(s.products, products, s.notifications),
       adjustments: [{ ...a, id: uid("a"), date: now(), before, after, by: s.currentUser }, ...s.adjustments],
     }));
   },
@@ -1261,7 +1289,7 @@ export const actions = {
     }));
   },
   holdSale(h: Omit<M.HeldSale, "id" | "date">) {
-    setState((s) => ({ held: [{ ...h, id: uid("h"), date: now() }, ...s.held] }));
+    setState((s) => ({ held: capHeld([{ ...h, id: uid("h"), date: now() }, ...s.held]) }));
   },
   removeHeld(id: string) {
     setState((s) => ({ held: s.held.filter((h) => h.id !== id) }));

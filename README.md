@@ -1195,6 +1195,31 @@ npm start
 
 `npm run build` outputs a Nitro server to `.output/`. `npm start` runs `node .output/server/index.mjs`.
 
-Deploy the `.output` folder (or the whole repo with `npm run build` as the build command and `npm start` as the start command) to Node hosts such as Railway, Render, DigitalOcean, or a VPS.
+### Vercel (recommended)
 
-For Vercel / Netlify / Cloudflare, keep the Nitro Vite plugin in `vite.config.ts` and follow the TanStack Start hosting docs for that platform.
+This app is TanStack Start + Nitro and is ready for Vercel with zero extra build settings.
+
+1. Push the repo to GitHub (already: `zaid-1221/shoppos`).
+2. Go to [vercel.com/new](https://vercel.com/new) and import the repository.
+3. Confirm **Framework Preset** is **TanStack Start** (`vercel.json` sets this).
+4. Leave Build Command / Output Directory as detected — do not override them.
+5. Click **Deploy**.
+
+No environment variables are required for the current mock/frontend-only app.
+
+Optional local check of the Vercel Nitro preset:
+
+```sh
+npm run build:vercel
+```
+
+Or deploy from the CLI after `npm i -g vercel`:
+
+```sh
+vercel
+vercel --prod
+```
+
+### Other Node hosts
+
+Deploy the whole repo with `npm run build` as the build command and `npm start` as the start command to Railway, Render, DigitalOcean, or a VPS.

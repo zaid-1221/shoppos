@@ -25,7 +25,7 @@ export default defineConfig({
       srcDirectory: "src",
       server: { entry: "server" },
     }),
-    viteReact(),
     nitro(),
+    viteReact(),
   ],
 });
